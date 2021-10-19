@@ -6,14 +6,19 @@ from hashlib import md5
 import copy
 import itertools as it
 import random
+import pandas as pd
 
-INF = 100
+INF = 1000
 HASHLEN = 20
 
 def powerset(l):
     '''Produce all subsets of an iterable'''
     for sl in it.product(*[[[], [i]] for i in l]):
         yield {j for i in sl for j in i}
+
+def masklist(mylist, mymask):
+    '''mask if True'''
+    return [a for a,b in zip(mylist,mymask) if not b]
 
 @total_ordering
 class Creature:
@@ -28,6 +33,7 @@ class Creature:
     def __repr__(self): return f'({self.p},{self.t})'
     def __eq__(self, other):  return (self.p+self.t) == (other.p+other.t)
     def __lt__(self, other):  return (self.p+self.t) <  (other.p+other.t)
+    def __sub__(self, other): return Creature(self.p-other.p, self.t-other.t)
     def __add__(self, other): return Creature(self.p+other.p, self.t+other.t)
     def __radd__(self, other):
         if      other == 0: return self
@@ -103,6 +109,12 @@ class BoardState:
 
         l1 = self.state1.life
         l2 = self.state2.life
+
+        if l1 == 0: return -1*INF
+        if l2 == 0: return INF
+
+        if p2+t2 == 0: return (p1+t1)/l2
+        if p1+t1 == 0: return (p2+t2)/l1
 
         return ((p1+t1)/l2)/((p2+t2)/l1)
 
@@ -193,97 +205,121 @@ class Combat:
 
 
     @staticmethod
-    def attack(bs: BoardState)->bool:
-        """ Return True if attacking is a good idea.
+    def attack(bs: BoardState)->set[Creature]:
+        """ Return a set of attackers if attacking is a good idea.
         1. Attack if we have lethal (<Settle The Wreckage> OP vs this AI)
         2. Consider the board-state's value after all possible blocks
+
+        >>> Combat.attack(BoardState(
+            State(16, [Creature(1,1), Creature(4,2)]),
+            State(11, [Creature(2,2), Creature(2,3), Creature(8,9)]))
+        )
+
+            16      |
+            10      |       (2,2); (2,3); (8,9)
+
+        >>> Combat.attack(MTG.gen_board_state_from_string(
+        ''' 9       |       (1,5); (7,9)
+            12      |       (2,8); (8,3); (4,8) '''
+        ))
         """
         attackers = bs.state1.creatures
         blockers  = bs.state2.creatures
 
+        block_vals = dict()  # TEMP
+
         if bs.check_lethal(): return True
         # Use fight and state to check advantage deltas
+        # TODO nest this whole thing in another loop that tries all all attacking sets
         possible_blocks = Combat.enumerate_blocks(attackers, blockers)
-        bs_cur_val  = bs.eval()
-        bs_star_val = bs.eval()
-        for block in blocks:
-            for ix_atk, s_blockers in enumerate(block):
-                bs_next_val = assign_damage(attackers[ix_atk], s_blockers)
-                if bs_star_val < bs_next_val: bs_star_val = bs_next_val
+        bs_max = copy.deepcopy(bs)
+        print(bs)
+        print('---')
+        for block in possible_blocks:
+            # consumed_blocker - "cb"
+            cb_stats = Creature(0,0)
+            cbs = set()
+            attackers_die = list()
+            player2_life = bs.state2.life
+            # total the blocker stats for each attacker slot in the block
+            for ix_atk, s_blockers in enumerate(block.attacker_slots):
+                cb_stats_i, cbs_i, attacker_dies =\
+                        MTG.assign_damage(attackers[ix_atk], s_blockers)
+                cb_stats += cb_stats_i
+                cbs = cbs.union(set(cbs_i))
+                attackers_die += [attacker_dies]
+                if len(s_blockers) == 0: # attacker gets through
+                    player2_life -= attackers[ix_atk].p
+            state1 = State(bs.state1.life, masklist(attackers, attackers_die))
+            state2 = State(player2_life, set(blockers).difference(cbs))
+            bs_curr = copy.deepcopy(BoardState(state1, state2))
 
+            # TODO temp
+            attackers_die.append(bs_curr.value)
+            block_vals[block] = attackers_die
+
+            if bs_max.value < bs_curr.value: bs_max = bs_curr
+
+        df = pd.DataFrame(data=block_vals, index=it.chain([i+1 for i in range(len(attackers_die)-1)], ['val'])).T
+        print(df.sort_values(by='val'))
+
+        return bs_max
 
 class MTG:
     @staticmethod
-    def assign_damage(c1: Creature, c2: Creature)->int:
+    def assign_damage(c1: Creature, cs2: set[Creature])->(Creature, list[Creature], bool):
+        """ Consider permutations of damage assignment orderings
+        and return combined value of consumed blockers, optimal damage assignment order,
+        and if the attacker dies
+        Remember: Attacking player assigns damage.
+        Score is total of consumed blocking creatures
+        >>> MTG.assign_damage(Creature(1,1), {Creature(2,2)})
+        ((0,0), [(2,2)], True)
+
+        >>> MTG.assign_damage(Creature(10,10),{Creature(*t) for t in [(1,3), (5,1), (9,3), (9,5)]})
+        ((23,9), [(9,5), (9,3), (5,1)], True)
+
+        >>> MTG.assign_damage(Creature(10,10), {Creature(11,11)})
+        ((0,0), [(11,11)], True)
+
+        >>> MTG.assign_damage(Creature(10,10), {Creature(4,4)})
+        ((4,4), [(4,4)], False)
         """
-        >>> assign_damage(Creature(1, 2), Creature(1, 1))
-        1
-
-        >>> assign_damage(Creature(1, 1), Creature(1, 1))
-        0
-
-        >>> assign_damage(Creature(1, 1), Creature(2, 2))
-        -1
-        """
-        a1 = (c1.p >= c2.t)  #a - "advantage"
-        a2 = (c2.p >= c1.t)
-
-        if      a1 and a2:          return  0  # both die
-        elif    a1 and (not a2):    return  1  # only c2 dies
-        else:                       return -1  # only c1 dies
-
-    @staticmethod
-    def assign_damage(c1: Creature, cs2: set[Creature])->int:
-        # TODO redo from perspective of attacker. Factor in total stats, not just the
-        # toughness
-        """ Currently a greedy algorithm based on the presence/absence of hanging damage.
-        Remember: Attacking player assigns damage; scores relative to creature 1 (attacker).
-        >>> MTG.assign_damage(Creature(4, 4), {Creature(1, 1), Creature(1,1)})
-        1
-
-        >>> MTG.assign_damage(Creature(2, 2), {Creature(1, 1), Creature(1,1)})
-        0
-
-        >>> MTG.assign_damage(Creature(2, 2), {Creature(1, 1), Creature(2,2)})
-        0
-
-        >>> MTG.assign_damage(Creature(4, 4), {Creature(3, 3), Creature(2,2)})
-        -1
-
-        TODO: Should be 1 bc more total stats are off the table
-        >>> MTG.assign_damage(Creature(4, 4), {Creature(10, 3), Creature(2,2)})
-        -1
-
-        >>> MTG.assign_damage(Creature(3, 3), {Creature(4, 4)})
-        -1
-        """
-        even = lambda c1, cs2: c1.p == sum(cs2).t
-
-        def bad_trade(c1, cs2):
-            # TODO consider permutations return a resource amount
-            consumed = Creature(0,0)
-            p = c1.p
-            # import pdb; pdb.set_trace()  # TODO BREAKPOINT
-            for b in sorted(blockers, reverse=True):
-                p -= b.t
-                if   p == 0:return consumed+b < c1 #False
-                elif p < 0: return consumed   < c1 #True
-                consumed += b
-            return consumed < c1 #False
-
-        res=1
-        print(c1, cs2)
-        print('----')
+        # print(c1, cs2)
+        # print('----')
+        blockers_max = Creature(0,0)
+        order_max = None
         for blockers in powerset(cs2):
             if len(blockers) == 0:      continue
-            print(blockers)
-            print('bad trade', bad_trade(c1, blockers))
-            if bad_trade(c1, blockers): return -1
-            if even(c1, blockers):      res = 0
-        return res
+            # Calc trade value for a blocker ordering
+            ao_max = Creature(0,0)
+            for assignment_order in it.permutations(blockers):
+                consumed = Creature(0,0)
+                p = c1.p
+                import ipdb; ipdb.set_trace()  # TODO BREAKPOINT
+                for b in assignment_order:
+                    p -= b.t
+                    if   p == 0:consumed+=b; break
+                    elif p < 0: break
+                    consumed += b
+                    if ao_max < consumed:
+                        ao_max = consumed
+                        ao_order_max = assignment_order
+            if blockers_max < ao_max:
+                blockers_max = ao_max
+                order_max = ao_order_max
+        #handle empty blocker set
+        if order_max: order_max = sorted(order_max, reverse=True)
+        else: order_max = list()
+        if len(cs2)==0: attacker_dies = False
+        elif blockers_max == Creature(0,0): attacker_dies = c1.t < sum(cs2).p
+        else: attacker_dies = c1.t <= blockers_max.p
+        return blockers_max, order_max, attacker_dies
 
     @staticmethod
-    def gen_random_board_state(num_c1=3, num_c2=2):
+    def gen_random_board_state(c1_max=3, c2_max=3):
+        num_c1=random.randint(1,c1_max)
+        num_c2=random.randint(1,c2_max)
         gen_creatures = lambda max_creatures: [
                 Creature(random.randint(0, 10), random.randint(1, 10))\
                     for i in range(max_creatures)]
@@ -292,6 +328,22 @@ class MTG:
                     State(random.randint(1, 20), gen_creatures(num_c1)),
                     State(random.randint(1, 20), gen_creatures(num_c2))
                 )
+
+    @staticmethod
+    def gen_board_state_from_string(s)->BoardState:
+        ''' 9       |       (1,5); (7,9)
+            12      |       (2,8); (8,3); (4,8) '''
+        state1str, state2str = s.split('\n')
+
+        def gen_state_from_string(ss)->State:
+            life = int(ss.split('|')[0].strip())
+            creatures = [Creature(*eval(t.strip())) for t in ss.split('|')[1].strip().split(';')]
+            return State(life, creatures)
+
+        state1 = gen_state_from_string(state1str)
+        state2 = gen_state_from_string(state2str)
+
+        return BoardState(state1, state2)
 
 
 if __name__ == '__main__':
