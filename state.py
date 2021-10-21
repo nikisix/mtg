@@ -3,10 +3,11 @@ python -m doctest ./state.py
 """
 from functools import total_ordering
 from hashlib import md5
+from math import log
 import copy
 import itertools as it
-import random
 import pandas as pd
+import random
 
 INF = 1000
 HASHLEN = 20
@@ -113,10 +114,7 @@ class BoardState:
         if l1 == 0: return -1*INF
         if l2 == 0: return INF
 
-        if p2+t2 == 0: return (p1+t1)/l2
-        if p1+t1 == 0: return (p2+t2)/l1
-
-        return ((p1+t1)/l2)/((p2+t2)/l1)
+        return (p1+t1+log(l1+1))/(p2+t2+log(l2+1))
 
     def __lt__(self, other):
         return self.eval() < other.eval()
@@ -222,6 +220,9 @@ class Combat:
         ''' 9       |       (1,5); (7,9)
             12      |       (2,8); (8,3); (4,8) '''
         ))
+
+        9       |       (7,9)
+        12      |       (2,8); (8,3); (4,8)
         """
         attackers = bs.state1.creatures
         blockers  = bs.state2.creatures
@@ -232,7 +233,7 @@ class Combat:
         # Use fight and state to check advantage deltas
         # TODO nest this whole thing in another loop that tries all all attacking sets
         possible_blocks = Combat.enumerate_blocks(attackers, blockers)
-        bs_max = copy.deepcopy(bs)
+        bs_min = BoardState(State(INF, []), State(-INF, []))
         print(bs)
         print('---')
         for block in possible_blocks:
@@ -254,16 +255,30 @@ class Combat:
             state2 = State(player2_life, set(blockers).difference(cbs))
             bs_curr = copy.deepcopy(BoardState(state1, state2))
 
-            # TODO temp
-            attackers_die.append(bs_curr.value)
-            block_vals[block] = attackers_die
+            if bs_curr.value < bs_min.value: bs_min = bs_curr
 
-            if bs_max.value < bs_curr.value: bs_max = bs_curr
+            # Debug
+            resulting_bs = [
+                bs_curr.value,
+                str(bs_curr)\
+                    .replace(' ', '')\
+                    .replace('\t', ' ')\
+                    .replace('\n', ' || ')
+            ]
+            block_vals[block] = resulting_bs
 
-        df = pd.DataFrame(data=block_vals, index=it.chain([i+1 for i in range(len(attackers_die)-1)], ['val'])).T
+        df = pd.DataFrame(
+                data=block_vals,
+                index=it.chain(
+                    [i+1 for i in range(len(attackers_die)-2)],
+                    ['val'],
+                    ['resulting_bs']
+                )
+            ).T
         print(df.sort_values(by='val'))
+        # End Debug
 
-        return bs_max
+        return bs_min
 
 class MTG:
     @staticmethod
@@ -284,6 +299,8 @@ class MTG:
 
         >>> MTG.assign_damage(Creature(10,10), {Creature(4,4)})
         ((4,4), [(4,4)], False)
+
+        min(masklist(list(range(len(np.array(range(5))<3))), np.array(range(5))<3)) - 1
         """
         # print(c1, cs2)
         # print('----')
@@ -294,17 +311,17 @@ class MTG:
             # Calc trade value for a blocker ordering
             ao_max = Creature(0,0)
             for assignment_order in it.permutations(blockers):
-                consumed = Creature(0,0)
+                consumed_stats = Creature(0,0)
+                consumed = list()
                 p = c1.p
-                import ipdb; ipdb.set_trace()  # TODO BREAKPOINT
                 for b in assignment_order:
                     p -= b.t
-                    if   p == 0:consumed+=b; break
-                    elif p < 0: break
-                    consumed += b
-                    if ao_max < consumed:
-                        ao_max = consumed
-                        ao_order_max = assignment_order
+                    if p < 0: break
+                    consumed_stats += b
+                    consumed.append(b)
+                    if ao_max < consumed_stats:
+                        ao_max = consumed_stats
+                        ao_order_max = consumed
             if blockers_max < ao_max:
                 blockers_max = ao_max
                 order_max = ao_order_max
