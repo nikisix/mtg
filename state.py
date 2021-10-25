@@ -11,6 +11,7 @@ import random
 
 INF = 1000
 HASHLEN = 20
+DEBUG = False
 
 def powerset(l):
     '''Produce all subsets of an iterable'''
@@ -124,25 +125,13 @@ class BoardState:
 
 class Combat:
     @staticmethod
-    def block(attacker_slots: list[list[Creature]], blockers: list[Creature], possible_blocks:
+    def _gen_blocks(attacker_slots: list[list[Creature]], blockers: list[Creature], possible_blocks:
             list) -> None:
         ''' Recursively generate all possible blocks.
         Note: This method generates duplicates.
         Ex. 2 attackers, 3 blockers:
-        >>> BoardState.block([[],[]], list(range(2)), [])
-        [[[], []],
-         [[0], []],
-         [[0, 1], []],
-         [[0], [1]],
-         [[], [0]],
-         [[1], [0]],
-         [[], [0, 1]],
-         [[1], []],
-         [[1, 0], []],
-         [[1], [0]],
-         [[], [1]],
-         [[0], [1]],
-         [[], [1, 0]]]
+        >>> Combat._gen_blocks([[],[]], list(range(2)), [])
+        [[[], []], [[0], []], [[0, 1], []], [[0], [1]], [[], [0]], [[1], [0]], [[], [0, 1]], [[1], []], [[1, 0], []], [[1], [0]], [[], [1]], [[0], [1]], [[], [1, 0]]]
         '''
         # print(attacker_slots)
         possible_blocks.append(copy.deepcopy(attacker_slots))
@@ -152,22 +141,18 @@ class Combat:
             b = blockers_cp.pop(i)
             for slot in attacker_slots:
                 slot.append(b)
-                Combat.block(attacker_slots, blockers_cp, possible_blocks)
+                Combat._gen_blocks(attacker_slots, blockers_cp, possible_blocks)
                 slot.pop()
         return possible_blocks
 
 
     @staticmethod
-    def dedup_blocks(blocks: list[list[list]]):
+    def _dedup_blocks(blocks: list[list[list]]):
         '''blocks: block[attacker_slot[blocker]]
         Ref block documentation for more details on the blocks data structure.
         Convert blocks to immutable and hashable types then use set to dedup
-        >>> s.add((tuple(b[0]), tuple(b[1])))
 
-        >>> set(tuple(blockers) for blockers in b)
-        {(0, 1), (2,)}
-
-        >>> print('\n'.join(sorted([str(e).replace('-','\t') for e in BoardState.dedup_blocks(BoardState.block([list() for _ in range(2)], list(range(2)), list())) ])))
+        # >>> print('\n'.join(sorted([str(e).replace('-','\t') for e in BoardState._dedup_blocks(BoardState._gen_blocks([list() for _ in range(2)], list(range(2)), list())) ])))
         set()   set()
         set()   {0, 1}
         set()   {0}
@@ -191,8 +176,8 @@ class Combat:
         """
         attacker_slots = [list() for _ in range(len(attackers))]
         blocks = list()
-        blocks = Combat.block(attacker_slots, blockers, blocks)
-        blocks = Combat.dedup_blocks(blocks)
+        blocks = Combat._gen_blocks(attacker_slots, blockers, blocks)
+        blocks = Combat._dedup_blocks(blocks)
         return blocks
 
     @staticmethod
@@ -201,109 +186,31 @@ class Combat:
             for slot in block: print(f'{slot}\t', end='')
             print()
 
-
-    @staticmethod
-    def attack(bs: BoardState)->set[Creature]:
-        """ Return a set of attackers if attacking is a good idea.
-        1. Attack if we have lethal (<Settle The Wreckage> OP vs this AI)
-        2. Consider the board-state's value after all possible blocks
-
-        >>> Combat.attack(BoardState(
-            State(16, [Creature(1,1), Creature(4,2)]),
-            State(11, [Creature(2,2), Creature(2,3), Creature(8,9)]))
-        )
-
-            16      |
-            10      |       (2,2); (2,3); (8,9)
-
-        >>> Combat.attack(MTG.gen_board_state_from_string(
-        ''' 9       |       (1,5); (7,9)
-            12      |       (2,8); (8,3); (4,8) '''
-        ))
-
-        9       |       (7,9)
-        12      |       (2,8); (8,3); (4,8)
-        """
-        attackers = bs.state1.creatures
-        blockers  = bs.state2.creatures
-
-        block_vals = dict()  # TEMP
-
-        if bs.check_lethal(): return True
-        # Use fight and state to check advantage deltas
-        # TODO nest this whole thing in another loop that tries all all attacking sets
-        possible_blocks = Combat.enumerate_blocks(attackers, blockers)
-        bs_min = BoardState(State(INF, []), State(-INF, []))
-        print(bs)
-        print('---')
-        for block in possible_blocks:
-            # consumed_blocker - "cb"
-            cb_stats = Creature(0,0)
-            cbs = set()
-            attackers_die = list()
-            player2_life = bs.state2.life
-            # total the blocker stats for each attacker slot in the block
-            for ix_atk, s_blockers in enumerate(block.attacker_slots):
-                cb_stats_i, cbs_i, attacker_dies =\
-                        MTG.assign_damage(attackers[ix_atk], s_blockers)
-                cb_stats += cb_stats_i
-                cbs = cbs.union(set(cbs_i))
-                attackers_die += [attacker_dies]
-                if len(s_blockers) == 0: # attacker gets through
-                    player2_life -= attackers[ix_atk].p
-            state1 = State(bs.state1.life, masklist(attackers, attackers_die))
-            state2 = State(player2_life, set(blockers).difference(cbs))
-            bs_curr = copy.deepcopy(BoardState(state1, state2))
-
-            if bs_curr.value < bs_min.value: bs_min = bs_curr
-
-            # Debug
-            resulting_bs = [
-                bs_curr.value,
-                str(bs_curr)\
-                    .replace(' ', '')\
-                    .replace('\t', ' ')\
-                    .replace('\n', ' || ')
-            ]
-            block_vals[block] = resulting_bs
-
-        df = pd.DataFrame(
-                data=block_vals,
-                index=it.chain(
-                    [i+1 for i in range(len(attackers_die)-2)],
-                    ['val'],
-                    ['resulting_bs']
-                )
-            ).T
-        print(df.sort_values(by='val'))
-        # End Debug
-
-        return bs_min
-
-class MTG:
     @staticmethod
     def assign_damage(c1: Creature, cs2: set[Creature])->(Creature, list[Creature], bool):
         """ Consider permutations of damage assignment orderings
-        and return combined value of consumed blockers, optimal damage assignment order,
+        Return: combined value of consumed blockers, optimal damage assignment order,
         and if the attacker dies
         Remember: Attacking player assigns damage.
         Score is total of consumed blocking creatures
-        >>> MTG.assign_damage(Creature(1,1), {Creature(2,2)})
-        ((0,0), [(2,2)], True)
 
-        >>> MTG.assign_damage(Creature(10,10),{Creature(*t) for t in [(1,3), (5,1), (9,3), (9,5)]})
+        Can vectorize with something like:
+        min(masklist(list(range(len(np.array(range(5))<3))), np.array(range(5))<3)) - 1
+
+        >>> Combat.assign_damage(Creature(1,1), {Creature(2,2)})
+        ((0,0), [], True)
+
+        >>> Combat.assign_damage(Creature(10,10),{Creature(*t) for t in [(1,3), (5,1), (9,3), (9,5)]})
         ((23,9), [(9,5), (9,3), (5,1)], True)
 
-        >>> MTG.assign_damage(Creature(10,10), {Creature(11,11)})
-        ((0,0), [(11,11)], True)
+        >>> Combat.assign_damage(Creature(10,10), {Creature(11,11)})
+        ((0,0), [], True)
 
-        >>> MTG.assign_damage(Creature(10,10), {Creature(4,4)})
+        >>> Combat.assign_damage(Creature(10,10), {Creature(4,4)})
         ((4,4), [(4,4)], False)
 
-        min(masklist(list(range(len(np.array(range(5))<3))), np.array(range(5))<3)) - 1
         """
-        # print(c1, cs2)
-        # print('----')
+        if DEBUG: print(c1, cs2); print('----')
         blockers_max = Creature(0,0)
         order_max = None
         for blockers in powerset(cs2):
@@ -333,6 +240,90 @@ class MTG:
         else: attacker_dies = c1.t <= blockers_max.p
         return blockers_max, order_max, attacker_dies
 
+    @staticmethod
+    def attack(bs: BoardState)->set[Creature]:
+        ''' Return a set of attackers if attacking is a good idea.
+            1. Attack if we have lethal (<Settle The Wreckage> OP vs this AI)
+            2. Consider the board-state's value after all possible blocks
+        '''
+        if bs.check_lethal(): return True
+
+
+
+    @staticmethod
+    def best_block(bs: BoardState)->BoardState:
+        """ Evaluate all possible blocks and damage assignments thereof.
+        Return resultant BoardState after the best block has been performed.
+
+        >>> Combat.best_block(BoardState( \
+            State(16, [Creature(1,1), Creature(4,2)]), \
+            State(11, [Creature(2,2), Creature(2,3), Creature(8,9)])) \
+        )
+        16  |
+        11  |       (2,2); (2,3); (8,9)
+
+        >>> Combat.best_block( BoardState( \
+            State(9, [Creature(1,5), Creature(7,9)]), \
+            State(12,[Creature(*t) for t in [(2,8), (8,3), (4,8)]]) \
+        ))
+        9   |       (7,9)
+        12  |       (2,8); (8,3); (4,8)
+        """
+        attackers = bs.state1.creatures
+        blockers  = bs.state2.creatures
+
+        block_vals = dict()  # TEMP
+
+        # Use fight and state to check advantage deltas
+        possible_blocks = Combat.enumerate_blocks(attackers, blockers)
+        bs_min = BoardState(State(INF, []), State(-INF, []))
+        if DEBUG: print(bs); print('---')
+        for block in possible_blocks:
+            # consumed_blocker - "cb"
+            cb_stats = Creature(0,0)
+            cbs = set()
+            attackers_die = list()
+            player2_life = bs.state2.life
+            # total the blocker stats for each attacker slot in the block
+            for ix_atk, s_blockers in enumerate(block.attacker_slots):
+                cb_stats_i, cbs_i, attacker_dies =\
+                        Combat.assign_damage(attackers[ix_atk], s_blockers)
+                cb_stats += cb_stats_i
+                cbs = cbs.union(set(cbs_i))
+                attackers_die += [attacker_dies]
+                if len(s_blockers) == 0: # attacker gets through
+                    player2_life -= attackers[ix_atk].p
+            state1 = State(bs.state1.life, masklist(attackers, attackers_die))
+            state2 = State(player2_life, set(blockers).difference(cbs))
+            bs_curr = copy.deepcopy(BoardState(state1, state2))
+
+            if bs_curr.value < bs_min.value: bs_min = bs_curr
+
+            if DEBUG:
+                resulting_bs = [
+                    bs_curr.value,
+                    str(bs_curr)\
+                        .replace(' ', '')\
+                        .replace('\t', ' ')\
+                        .replace('\n', ' || ')
+                ]
+                block_vals[block] = resulting_bs
+
+        if DEBUG:
+            df = pd.DataFrame(
+                    data=block_vals,
+                    index=it.chain(
+                        [i+1 for i in range(len(attackers_die)-2)],
+                        ['val'],
+                        ['resulting_bs']
+                    )
+                ).T
+            print(df.sort_values(by='val'))
+
+        return bs_min
+
+
+class MTG:
     @staticmethod
     def gen_random_board_state(c1_max=3, c2_max=3):
         num_c1=random.randint(1,c1_max)
@@ -382,7 +373,7 @@ if __name__ == '__main__':
     # cs2 = bs.state2.creatures
     # Combat.enumerate_blocks(cs1, cs2)
 
-    Combat.attack(MTG.gen_board_state_from_string(
+    Combat.best_block(MTG.gen_board_state_from_string(
     ''' 9       |       (1,5); (7,9)
         12      |       (2,8); (8,3); (4,8) '''
     ))
