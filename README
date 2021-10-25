@@ -1,1 +1,8 @@
 This simple combat evaluator determines the best attack for a given boardstate and lifetotals.
+
+TODO refactor state.py
+
+%autoreload
+%load_ext autoreload
+%autoreload 2
+%aimport state

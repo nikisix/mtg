@@ -381,3 +381,8 @@ if __name__ == '__main__':
     # cs1 = bs.state1.creatures
     # cs2 = bs.state2.creatures
     # Combat.enumerate_blocks(cs1, cs2)
+
+    Combat.attack(MTG.gen_board_state_from_string(
+    ''' 9       |       (1,5); (7,9)
+        12      |       (2,8); (8,3); (4,8) '''
+    ))
