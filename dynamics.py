@@ -1,5 +1,5 @@
 """ run tests with:
-python -m doctest ./state.py
+python -m doctest ./dynamics.py
 """
 from functools import total_ordering
 from hashlib import md5
@@ -31,7 +31,7 @@ class Creature:
         self.t = toughness
         self._hash = int(md5(random.randbytes(HASHLEN)).hexdigest(), base=16)
         self.abilities = None  #TODO{'flying': False, 'first_strike': True}
-    def __hash__(self): return self._hash
+    def __hash__(self): return self._hash  # Ex. Prevent two 1/1's colliding
     def __repr__(self): return f'({self.p},{self.t})'
     def __eq__(self, other):  return (self.p+self.t) == (other.p+other.t)
     def __lt__(self, other):  return (self.p+self.t) <  (other.p+other.t)
@@ -81,6 +81,15 @@ class BoardState:
 
     def __repr__(self):
         return '\n'.join([str(self.state1), str(self.state2)])
+
+    def repr_one_line(self):
+        return (
+            self.value
+            , self.__repr__()\
+                .replace(' ', '')\
+                .replace('\t', ' ')\
+                .replace('\n', ' || ')
+        )
 
     def check_lethal(self):
         """Returns:
@@ -133,7 +142,6 @@ class Combat:
         >>> Combat._gen_blocks([[],[]], list(range(2)), [])
         [[[], []], [[0], []], [[0, 1], []], [[0], [1]], [[], [0]], [[1], [0]], [[], [0, 1]], [[1], []], [[1, 0], []], [[1], [0]], [[], [1]], [[0], [1]], [[], [1, 0]]]
         '''
-        # print(attacker_slots)
         possible_blocks.append(copy.deepcopy(attacker_slots))
         if len(blockers)==0: return
         for i, blocker in enumerate(blockers):
@@ -167,7 +175,6 @@ class Combat:
         for block in blocks: s_blocks.add(Block(block))
         return s_blocks
 
-
     @staticmethod
     def enumerate_blocks(attackers: list[Creature], blockers: list[Creature]):
         """ Say we have three attackers and three blockers [5, 6, 7]
@@ -179,6 +186,50 @@ class Combat:
         blocks = Combat._gen_blocks(attacker_slots, blockers, blocks)
         blocks = Combat._dedup_blocks(blocks)
         return blocks
+
+    @staticmethod
+    def enumerate_attacks(bs: BoardState):
+        return powerset(bs.state1.creatures)
+
+    @staticmethod
+    def attack(bs: BoardState)->set[Creature]:
+        ''' Return a set of attackers if attacking is a good idea.
+            1. Attack if we have lethal (<Settle The Wreckage> OP vs this AI)
+            2. Consider the board-state's value after all possible blocks
+        '''
+        if bs.check_lethal(): return True
+
+    @staticmethod
+    def best_attack(bs: BoardState, debug=False)->(set, BoardState):
+        '''Returns: (best_set_of_attackers, resultant_boardstate)
+        '''
+        if bs.check_lethal():
+            print('lethal')
+            return (set(bs.state1.creatures), Combat.best_block(bs))
+
+        val_max = -1*INF
+        attack_max = []
+        debug_vals = list()
+        for attack_i in Combat.enumerate_attacks(bs):
+            held_back = set(bs.state1.creatures) - set(attack_i)
+            state1 = State(bs.state1.life, attack_i)
+            bs_i = BoardState(state1, bs.state2)
+            bs_res_i = Combat.best_block(bs_i)
+            bs_res_i.state1.creatures += list(held_back)
+            bs_res_i.value = bs_res_i.eval()
+            if debug: debug_vals.append((attack_i, *bs_res_i.repr_one_line()))
+            if val_max < bs_res_i.value:
+                val_max = bs_res_i.value
+                attack_max = attack_i
+                bs_res_max = bs_res_i
+        if debug:
+            print(
+                pd.DataFrame(
+                    debug_vals,
+                    columns=['attack', 'val', 'bs']
+                ).sort_values('val'))
+        return attack_max, bs_res_max
+
 
     @staticmethod
     def print_blocks(blocks):
@@ -210,7 +261,6 @@ class Combat:
         ((4,4), [(4,4)], False)
 
         """
-        if DEBUG: print(c1, cs2); print('----')
         blockers_max = Creature(0,0)
         order_max = None
         for blockers in powerset(cs2):
@@ -239,16 +289,6 @@ class Combat:
         elif blockers_max == Creature(0,0): attacker_dies = c1.t < sum(cs2).p
         else: attacker_dies = c1.t <= blockers_max.p
         return blockers_max, order_max, attacker_dies
-
-    @staticmethod
-    def attack(bs: BoardState)->set[Creature]:
-        ''' Return a set of attackers if attacking is a good idea.
-            1. Attack if we have lethal (<Settle The Wreckage> OP vs this AI)
-            2. Consider the board-state's value after all possible blocks
-        '''
-        if bs.check_lethal(): return True
-
-
 
     @staticmethod
     def best_block(bs: BoardState)->BoardState:
@@ -300,13 +340,7 @@ class Combat:
             if bs_curr.value < bs_min.value: bs_min = bs_curr
 
             if DEBUG:
-                resulting_bs = [
-                    bs_curr.value,
-                    str(bs_curr)\
-                        .replace(' ', '')\
-                        .replace('\t', ' ')\
-                        .replace('\n', ' || ')
-                ]
+                resulting_bs = bs_curr.repr_one_line()
                 block_vals[block] = resulting_bs
 
         if DEBUG:
@@ -373,7 +407,9 @@ if __name__ == '__main__':
     # cs2 = bs.state2.creatures
     # Combat.enumerate_blocks(cs1, cs2)
 
-    Combat.best_block(MTG.gen_board_state_from_string(
-    ''' 9       |       (1,5); (7,9)
-        12      |       (2,8); (8,3); (4,8) '''
-    ))
+    Combat.best_block(
+        MTG.gen_board_state_from_string(
+            ''' 9       |       (1,1); (1,1); (1,5); (7,9)
+                12      |       (2,8); (8,3); (4,8) '''
+        )
+    )
