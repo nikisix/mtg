@@ -1,6 +1,11 @@
-""" run tests with:
+""" Contain the combat dynamics of MTG for use by the gym environment.
+
+run tests with:
 python -m doctest ./dynamics.py
 """
+
+# TODO teach the board state about tapped creatures (add/sub from value)
+
 from functools import total_ordering
 from hashlib import md5
 from math import log
@@ -9,6 +14,7 @@ import itertools as it
 import pandas as pd
 import random
 
+WIN_REWARD = 10
 INF = 1000
 HASHLEN = 20
 DEBUG = False
@@ -30,7 +36,7 @@ class Creature:
         self.toughness = toughness
         self.t = toughness
         self._hash = int(md5(random.randbytes(HASHLEN)).hexdigest(), base=16)
-        self.abilities = None  #TODO{'flying': False, 'first_strike': True}
+        self.abilities = None
     def __hash__(self): return self._hash  # Ex. Prevent two 1/1's colliding
     def __repr__(self): return f'({self.p},{self.t})'
     def __eq__(self, other):  return (self.p+self.t) == (other.p+other.t)
@@ -110,7 +116,7 @@ class BoardState:
         Can we sacrifice and win next turn?
         Can opponent win on the crack-back?
         '''
-        if self.check_lethal(): return INF
+        if self.check_lethal(): return WIN_REWARD
 
         p1 = sum([c.p for c in self.state1.creatures])
         p2 = sum([c.p for c in self.state2.creatures])
@@ -121,8 +127,8 @@ class BoardState:
         l1 = self.state1.life
         l2 = self.state2.life
 
-        if l1 == 0: return -1*INF
-        if l2 == 0: return INF
+        if l1 == 0: return -1*WIN_REWARD
+        if l2 == 0: return WIN_REWARD
 
         return (p1+t1+log(l1+1))/(p2+t2+log(l2+1))
 
@@ -188,34 +194,23 @@ class Combat:
         return blocks
 
     @staticmethod
-    def enumerate_attacks(bs: BoardState):
-        return powerset(bs.state1.creatures)
-
-    @staticmethod
-    def attack(bs: BoardState)->set[Creature]:
-        ''' Return a set of attackers if attacking is a good idea.
-            1. Attack if we have lethal (<Settle The Wreckage> OP vs this AI)
-            2. Consider the board-state's value after all possible blocks
-        '''
-        if bs.check_lethal(): return True
-
-    @staticmethod
-    def best_attack(bs: BoardState, debug=False)->(set, BoardState):
-        '''Returns: (best_set_of_attackers, resultant_boardstate)
+    def best_attack(bs: BoardState, debug=False)->list:
+        '''Returns:
+        (best_set_of_attackers: list[bool], estimated resultant boardstate)
+        1. Attack if we have lethal (<Settle The Wreckage> OP vs this AI)
+        2. Consider the board-state's value after all possible blocks
         '''
         if bs.check_lethal():
-            print('lethal')
-            return (set(bs.state1.creatures), Combat.best_block(bs))
+            if debug: print('lethal')
+            return [True]*len(bs.state1.creatures) #, Combat.best_block(bs.state1.creatures, bs)
 
         val_max = -1*INF
         attack_max = []
         debug_vals = list()
-        for attack_i in Combat.enumerate_attacks(bs):
-            held_back = set(bs.state1.creatures) - set(attack_i)
-            state1 = State(bs.state1.life, attack_i)
-            bs_i = BoardState(state1, bs.state2)
-            bs_res_i = Combat.best_block(bs_i)
-            bs_res_i.state1.creatures += list(held_back)
+        for attack_i in powerset(bs.state1.creatures):
+            # held_back = set(bs.state1.creatures) - set(attack_i)
+            bs_res_i = Combat.best_block(list(attack_i), bs, debug)
+            # bs_res_i.state1.creatures += list(held_back)
             bs_res_i.value = bs_res_i.eval()
             if debug: debug_vals.append((attack_i, *bs_res_i.repr_one_line()))
             if val_max < bs_res_i.value:
@@ -223,12 +218,18 @@ class Combat:
                 attack_max = attack_i
                 bs_res_max = bs_res_i
         if debug:
-            print(
-                pd.DataFrame(
-                    debug_vals,
-                    columns=['attack', 'val', 'bs']
-                ).sort_values('val'))
-        return attack_max, bs_res_max
+            print(pd.DataFrame(debug_vals, columns=['attack', 'val', 'bs']))
+            print('best attack:', attack_max)
+            print('predicted resulting boardstate:\n', bs_res_max)
+
+        attackers = bs.state1.creatures
+        action = [False]*len(attackers)
+        while 0 < len(attack_max):
+            a1 = attack_max.pop()
+            ix = attackers.index(a1)
+            action[ix] = True
+
+        return action #, bs_res_max
 
 
     @staticmethod
@@ -291,36 +292,37 @@ class Combat:
         return blockers_max, order_max, attacker_dies
 
     @staticmethod
-    def best_block(bs: BoardState)->BoardState:
+    def best_block(attackers:list, bs:BoardState, debug=False)->BoardState:
         """ Evaluate all possible blocks and damage assignments thereof.
         Return resultant BoardState after the best block has been performed.
+        Blocking is done from the perspective of player2 and therefore minimizes
+        instead of maximize damage.
 
-        >>> Combat.best_block(BoardState( \
+        >>> bs = BoardState( \
             State(16, [Creature(1,1), Creature(4,2)]), \
-            State(11, [Creature(2,2), Creature(2,3), Creature(8,9)])) \
-        )
+            State(11, [Creature(2,2), Creature(2,3), Creature(8,9)]))
+        >>> Combat.best_block(bs.state1.creatures, bs)
         16  |
         11  |       (2,2); (2,3); (8,9)
 
-        >>> Combat.best_block( BoardState( \
+        >>> bs = BoardState( \
             State(9, [Creature(1,5), Creature(7,9)]), \
-            State(12,[Creature(*t) for t in [(2,8), (8,3), (4,8)]]) \
-        ))
+            State(12,[Creature(*t) for t in [(2,8), (8,3), (4,8)]]))
+        >>> Combat.best_block(bs.state1.creatures, bs)
         9   |       (7,9)
         12  |       (2,8); (8,3); (4,8)
         """
-        attackers = bs.state1.creatures
+        vigils = list(set(bs.state1.creatures) - set(attackers))
         blockers  = bs.state2.creatures
-
-        block_vals = dict()  # TEMP
+        block_vals = dict()  # DEBUG
 
         # Use fight and state to check advantage deltas
         possible_blocks = Combat.enumerate_blocks(attackers, blockers)
         bs_min = BoardState(State(INF, []), State(-INF, []))
-        if DEBUG: print(bs); print('---')
+        if debug: print(bs); print('---')
         for block in possible_blocks:
             # consumed_blocker - "cb"
-            cb_stats = Creature(0,0)
+            cb_stats = Creature(0, 0)
             cbs = set()
             attackers_die = list()
             player2_life = bs.state2.life
@@ -333,21 +335,23 @@ class Combat:
                 attackers_die += [attacker_dies]
                 if len(s_blockers) == 0: # attacker gets through
                     player2_life -= attackers[ix_atk].p
-            state1 = State(bs.state1.life, masklist(attackers, attackers_die))
+            state1 = State(bs.state1.life,
+                        it.chain(masklist(attackers, attackers_die), vigils))
             state2 = State(player2_life, set(blockers).difference(cbs))
             bs_curr = copy.deepcopy(BoardState(state1, state2))
 
             if bs_curr.value < bs_min.value: bs_min = bs_curr
 
-            if DEBUG:
+            if debug:
                 resulting_bs = bs_curr.repr_one_line()
                 block_vals[block] = resulting_bs
 
-        if DEBUG:
+        if debug:
+            print(f'-----------------------\nattackers\n{attackers}\n-------------------')
             df = pd.DataFrame(
                     data=block_vals,
                     index=it.chain(
-                        [i+1 for i in range(len(attackers_die)-2)],
+                        [],# [i+1 for i in range(len(attackers_die)-2)],
                         ['val'],
                         ['resulting_bs']
                     )
@@ -359,7 +363,7 @@ class Combat:
 
 class MTG:
     @staticmethod
-    def gen_random_board_state(c1_max=3, c2_max=3):
+    def gen_random_boardstate(c1_max=3, c2_max=3):
         num_c1=random.randint(1,c1_max)
         num_c2=random.randint(1,c2_max)
         gen_creatures = lambda max_creatures: [
@@ -372,9 +376,12 @@ class MTG:
                 )
 
     @staticmethod
-    def gen_board_state_from_string(s)->BoardState:
-        ''' 9       |       (1,5); (7,9)
-            12      |       (2,8); (8,3); (4,8) '''
+    def gen_boardstate_from_string(s)->BoardState:
+        """ MTG.gen_boardstate_from_string(
+            ''' 9       |       (1,1); (1,1); (1,5); (7,9)
+                12      |       (2,8); (8,3); (4,8) ''')
+        """
+        s = s.strip()
         state1str, state2str = s.split('\n')
 
         def gen_state_from_string(ss)->State:
@@ -386,30 +393,3 @@ class MTG:
         state2 = gen_state_from_string(state2str)
 
         return BoardState(state1, state2)
-
-
-if __name__ == '__main__':
-    c1 = Creature(1, 2)
-    c2 = Creature(1, 1)
-    s1 = State(20, [c1, c1])
-    s2 = State(20, [c2, c2])
-    bs = BoardState(s1, s2)
-    bs.eval()
-
-    # bs = MTG().gen_random_board_state()
-    # l1 = list(range(5))
-    # l2 = [5,6,7]
-    # [5,6,7]; [5],[6,7]; [5],[6],[7]; [5, 6],[7]; [5,7],[6]
-
-    # from state import *
-    # bs = MTG.gen_random_board_state()
-    # cs1 = bs.state1.creatures
-    # cs2 = bs.state2.creatures
-    # Combat.enumerate_blocks(cs1, cs2)
-
-    Combat.best_block(
-        MTG.gen_board_state_from_string(
-            ''' 9       |       (1,1); (1,1); (1,5); (7,9)
-                12      |       (2,8); (8,3); (4,8) '''
-        )
-    )
